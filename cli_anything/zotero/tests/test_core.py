@@ -119,6 +119,54 @@ class PathDiscoveryTests(unittest.TestCase):
                 runtime_env = zotero_paths.build_environment(explicit_profile_dir=str(profile_root))
             self.assertEqual(runtime_env.data_dir, home / "Zotero")
 
+    def test_candidate_profile_roots_include_wsl_windows_local_and_roaming(self):
+        env = {
+            "USER": "starwink",
+            "WSL_DISTRO_NAME": "Ubuntu",
+        }
+        roots = zotero_paths.candidate_profile_roots(env=env, home=Path("/home/starwink"))
+        self.assertIn(Path("/mnt/c/Users/starwink/AppData/Roaming/Zotero/Zotero"), roots)
+        self.assertIn(Path("/mnt/c/Users/starwink/AppData/Local/Zotero/Zotero"), roots)
+
+    def test_build_environment_accepts_windows_profile_dir_in_wsl(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mount_root = Path(tmpdir) / "mnt" / "c" / "Users" / "starwink"
+            profile_root = mount_root / "AppData" / "Local" / "Zotero" / "Zotero"
+            profile_dir = profile_root / "Profiles" / "kf83xfe1.default"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            (profile_root / "profiles.ini").write_text(
+                "[Profile0]\nName=default\nIsRelative=1\nPath=Profiles/kf83xfe1.default\nDefault=1\n",
+                encoding="utf-8",
+            )
+            (profile_dir / "prefs.js").write_text("", encoding="utf-8")
+            data_dir = mount_root / "Zotero"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            with mock.patch("cli_anything.zotero.utils.zotero_paths._convert_windows_path_to_wsl", return_value=profile_root):
+                runtime_env = zotero_paths.build_environment(
+                    explicit_profile_dir=r"C:\Users\starwink\AppData\Local\Zotero\Zotero\Profiles\kf83xfe1.default",
+                    explicit_data_dir=str(data_dir),
+                    env={"WSL_DISTRO_NAME": "Ubuntu"},
+                )
+            self.assertEqual(runtime_env.profile_root, profile_root)
+            self.assertEqual(runtime_env.profile_dir, profile_dir)
+
+    def test_find_data_dir_converts_windows_pref_path_in_wsl(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_dir = Path(tmpdir) / "profile"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            data_dir = Path(tmpdir) / "mnt" / "c" / "Users" / "starwink" / "Zotero"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (profile_dir / "prefs.js").write_text(
+                '\n'.join([
+                    'user_pref("extensions.zotero.useDataDir", true);',
+                    'user_pref("extensions.zotero.dataDir", "C:\\\\Users\\\\starwink\\\\Zotero");',
+                ]),
+                encoding="utf-8",
+            )
+            with mock.patch("cli_anything.zotero.utils.zotero_paths._convert_windows_path_to_wsl", return_value=data_dir):
+                resolved = zotero_paths.find_data_dir(profile_dir, env={"WSL_DISTRO_NAME": "Ubuntu"})
+            self.assertEqual(resolved, data_dir)
+
     def test_ensure_local_api_enabled_writes_user_js(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             env = create_sample_environment(Path(tmpdir))

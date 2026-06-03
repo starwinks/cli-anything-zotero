@@ -110,6 +110,31 @@ zotero-cli app ping
 zotero-cli js "return Zotero.version"
 ```
 
+### WSL2 with Windows Zotero
+
+If you run `zotero-cli` inside WSL2 while Zotero is installed on Windows, the
+CLI now discovers the active Windows Zotero profile automatically. It supports:
+
+- `%APPDATA%\\Zotero\\Zotero\\Profiles\\...`
+- `%LOCALAPPDATA%\\Zotero\\Zotero\\Profiles\\...`
+- Windows-style absolute paths such as `C:\\Users\\<name>\\AppData\\...`
+- Zotero data directory preferences that point to Windows paths
+
+Typical usage still stays the same:
+
+```bash
+zotero-cli app install-plugin
+zotero-cli app plugin-status
+```
+
+If you need to override discovery explicitly, pass the root options before the
+subcommand:
+
+```bash
+zotero-cli --profile-dir /mnt/c/Users/<name>/AppData/Roaming/Zotero/Zotero/Profiles/<profile>.default app plugin-status
+zotero-cli --data-dir /mnt/d/Zotero/data app status
+```
+
 ### Troubleshooting
 
 | Problem | Solution |

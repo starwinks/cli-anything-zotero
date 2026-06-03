@@ -46,6 +46,50 @@ class ZoteroEnvironment:
         return data
 
 
+def _is_windows_style_absolute(path_value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:[\\/]", path_value))
+
+
+def _convert_windows_path_to_wsl(path_value: str) -> Path:
+    drive = path_value[0].lower()
+    remainder = path_value[2:].lstrip("\\/")
+    parts = [part for part in re.split(r"[\\/]+", remainder) if part]
+    return Path("/mnt") / drive / Path(*parts)
+
+
+def normalize_path(path_value: str | Path | None, env: Mapping[str, str] | None = None) -> Optional[Path]:
+    if path_value is None:
+        return None
+    raw = str(path_value).strip()
+    if not raw:
+        return None
+    if _is_windows_style_absolute(raw):
+        return _convert_windows_path_to_wsl(raw)
+    return Path(raw).expanduser()
+
+
+def _wsl_windows_home_candidates(env: Mapping[str, str], home: Path) -> list[Path]:
+    candidates: list[Path] = []
+
+    def add(path: Path | None) -> None:
+        if path and path not in candidates:
+            candidates.append(path)
+
+    if not (env.get("WSL_DISTRO_NAME") or env.get("WSL_INTEROP")):
+        return candidates
+
+    home_str = str(home)
+    if home_str.startswith("/mnt/") and len(home.parts) >= 4:
+        add(Path(*home.parts[:4]))
+
+    username = env.get("USER", "").strip()
+    if username:
+        for drive in ("c", "d"):
+            add(Path("/mnt") / drive / "Users" / username)
+
+    return candidates
+
+
 def candidate_profile_roots(env: Mapping[str, str] | None = None, home: Path | None = None) -> list[Path]:
     env = env or os.environ
     home = home or Path.home()
@@ -54,14 +98,21 @@ def candidate_profile_roots(env: Mapping[str, str] | None = None, home: Path | N
     def add(path: Path | str | None) -> None:
         if not path:
             return
-        candidate = Path(path).expanduser()
+        candidate = normalize_path(path, env=env)
+        if candidate is None:
+            return
         if candidate not in candidates:
             candidates.append(candidate)
 
-    appdata = env.get("APPDATA")
-    if appdata:
-        add(Path(appdata) / "Zotero" / "Zotero")
+    for env_name in ("APPDATA", "LOCALAPPDATA"):
+        base = env.get(env_name)
+        if base:
+            add(Path(base) / "Zotero" / "Zotero")
     add(home / "AppData" / "Roaming" / "Zotero" / "Zotero")
+    add(home / "AppData" / "Local" / "Zotero" / "Zotero")
+    for windows_home in _wsl_windows_home_candidates(env, home):
+        add(windows_home / "AppData" / "Roaming" / "Zotero" / "Zotero")
+        add(windows_home / "AppData" / "Local" / "Zotero" / "Zotero")
     add(home / "Library" / "Application Support" / "Zotero")
     add(home / ".zotero" / "zotero")
     return candidates
@@ -70,7 +121,7 @@ def candidate_profile_roots(env: Mapping[str, str] | None = None, home: Path | N
 def find_profile_root(explicit_profile_dir: str | None = None, env: Mapping[str, str] | None = None) -> Path:
     env = env or os.environ
     if explicit_profile_dir:
-        explicit = Path(explicit_profile_dir).expanduser()
+        explicit = normalize_path(explicit_profile_dir, env=env) or Path(explicit_profile_dir).expanduser()
         if explicit.name == "profiles.ini":
             return explicit.parent
         if (explicit / "profiles.ini").exists():
@@ -116,7 +167,9 @@ def _profile_path_from_section(profile_root: Path, config: configparser.ConfigPa
     if not path_value:
         return None
     is_relative = config.get(section, "IsRelative", fallback="1").strip() == "1"
-    return (profile_root / path_value).resolve() if is_relative else Path(path_value).expanduser()
+    if is_relative:
+        return (profile_root / path_value).resolve()
+    return normalize_path(path_value) or Path(path_value).expanduser()
 
 
 def _read_pref_file(path: Path) -> str:
@@ -156,17 +209,17 @@ def read_pref(profile_dir: Path | None, pref_name: str) -> Optional[str]:
 def find_data_dir(profile_dir: Path | None, explicit_data_dir: str | None = None, env: Mapping[str, str] | None = None) -> Path:
     env = env or os.environ
     if explicit_data_dir:
-        return Path(explicit_data_dir).expanduser()
+        return normalize_path(explicit_data_dir, env=env) or Path(explicit_data_dir).expanduser()
 
     env_data_dir = env.get("ZOTERO_DATA_DIR", "").strip()
     if env_data_dir:
-        return Path(env_data_dir).expanduser()
+        return normalize_path(env_data_dir, env=env) or Path(env_data_dir).expanduser()
 
     if profile_dir is not None:
         use_data_dir = read_pref(profile_dir, USE_DATA_DIR_PREF)
         pref_data_dir = read_pref(profile_dir, DATA_DIR_PREF)
         if use_data_dir == "true" and pref_data_dir:
-            candidate = Path(pref_data_dir).expanduser()
+            candidate = normalize_path(pref_data_dir, env=env) or Path(pref_data_dir).expanduser()
             if candidate.exists():
                 return candidate
 
@@ -176,11 +229,11 @@ def find_data_dir(profile_dir: Path | None, explicit_data_dir: str | None = None
 def find_executable(explicit_executable: str | None = None, env: Mapping[str, str] | None = None) -> Optional[Path]:
     env = env or os.environ
     if explicit_executable:
-        return Path(explicit_executable).expanduser()
+        return normalize_path(explicit_executable, env=env) or Path(explicit_executable).expanduser()
 
     env_executable = env.get("ZOTERO_EXECUTABLE", "").strip()
     if env_executable:
-        return Path(env_executable).expanduser()
+        return normalize_path(env_executable, env=env) or Path(env_executable).expanduser()
 
     for name in ("zotero", "zotero.exe"):
         path = shutil.which(name)
@@ -255,9 +308,10 @@ def build_environment(
     profile_root = find_profile_root(explicit_profile_dir=explicit_profile_dir, env=env)
     env_profile_dir = env.get("ZOTERO_PROFILE_DIR", "").strip()
     explicit_or_env_profile = explicit_profile_dir or env_profile_dir or None
+    normalized_explicit_profile = normalize_path(explicit_or_env_profile, env=env)
     profile_dir = (
-        Path(explicit_or_env_profile).expanduser()
-        if explicit_or_env_profile and (Path(explicit_or_env_profile) / "prefs.js").exists()
+        normalized_explicit_profile
+        if normalized_explicit_profile and (normalized_explicit_profile / "prefs.js").exists()
         else find_active_profile(profile_root)
     )
     executable = find_executable(explicit_executable=explicit_executable, env=env)
